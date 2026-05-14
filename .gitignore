@@ -1,0 +1,28 @@
+# Entornos virtuales
+venv/
+env/
+.env
+
+# Archivos compilados y cache de Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Directorios de salida de la aplicacion
+output/
+input/
+
+# Directorios de PyInstaller y despliegue
+build/
+dist/
+deploy/
+*.spec
+
+# Archivos de configuracion del IDE (vscode, etc)
+.vscode/
+.idea/
+
+# Archivos temporales o locales
+*.log
+*.tmp
+.DS_Store
