@@ -284,47 +284,148 @@ class ProformaParser:
         """Parse CONICO proforma items."""
         items = []
 
-        # CONICO format is typically text-based, parse line by line
-        lines = text.split('\n')
-        in_items = False
+        # Try table extraction first (some CONICO PDFs have tables)
+        if tables:
+            for table in tables:
+                for row in table:
+                    if row is None:
+                        continue
+                    row_str = [str(c) if c else "" for c in row]
+                    joined = " ".join(row_str).upper()
 
-        for line in lines:
-            line_stripped = line.strip()
-            upper = line_stripped.upper()
+                    # Skip headers and footers
+                    if any(skip in joined for skip in ["ITEM", "DESCRIPCION", "SUB-TOTAL", "SUBTOTAL",
+                                                        "OBSERVACIONES", "CONDICIONES", "GARANTIA",
+                                                        "OFERTA VALIDA", "TIEMPO DE ENTREGA",
+                                                        "ELABORAR CK", "SE NOS RETIENE",
+                                                        "DESCUENTO APLICADO", "LOS PRECIOS ESTAN"]):
+                        continue
 
-            # Detect start of items section
-            if "ITEM" in upper and "DESCRIPCION" in upper:
-                in_items = True
-                continue
+                    # Try to find item data in the row
+                    # Look for cells with C$ prices
+                    desc = ""
+                    cant = 1.0
+                    precio_u = 0.0
+                    precio_t = 0.0
+                    prices_found = []
 
-            # Detect end of items section
-            if in_items and ("SUB-TOTAL" in upper or "OBSERVACIONES" in upper):
-                in_items = False
-                continue
+                    for cell in row_str:
+                        cell = cell.strip()
+                        if not cell:
+                            continue
+                        # Check if cell contains a C$ price
+                        price_match = re.search(r'C\$\s*([\d,]+\.\d{2})', cell)
+                        if price_match:
+                            prices_found.append(self._clean_price(price_match.group(1)))
+                        elif re.match(r'^\d+\.?\d*$', cell):
+                            cant = float(cell)
+                        elif not re.match(r'^[\d.,\s]+$', cell) and len(cell) > 3:
+                            # Clean multiline descriptions
+                            desc = cell.replace('\n', ' ').strip()
 
-            if not in_items:
-                continue
+                    if desc and len(prices_found) >= 1:
+                        precio_u = prices_found[0]
+                        precio_t = prices_found[-1] if len(prices_found) > 1 else precio_u * cant
+                        items.append({
+                            'descripcion': desc,
+                            'cantidad': int(cant) if cant == int(cant) else cant,
+                            'precio_unitario': precio_u,
+                            'precio_total': precio_t
+                        })
 
-            # CONICO line format:
-            # DESCRIPCION CANT PRECIO TOTAL
-            # e.g.: EQUIPO HP DT 400 G9 SFF I5-13500/16GB/512GB/W11P#9L8V5LA#ABM 1.00 C$32,739.40 C$32,739.40
-            m = re.match(
-                r'^(.*?)\s+(\d+\.?\d*)\s+C\$([\d,]+\.\d{2})\s+C\$([\d,]+\.\d{2})$',
-                line_stripped
-            )
-            if m:
-                desc = m.group(1).strip()
-                cant = float(m.group(2))
-                precio_u = self._clean_price(m.group(3))
-                precio_t = self._clean_price(m.group(4))
+        # Text-based parsing (primary method for CONICO)
+        if not items:
+            lines = text.split('\n')
+            in_items = False
+            # Buffer to accumulate multi-line descriptions
+            pending_desc = ""
 
-                if desc and precio_u > 0:
-                    items.append({
-                        'descripcion': desc,
-                        'cantidad': int(cant) if cant == int(cant) else cant,
-                        'precio_unitario': precio_u,
-                        'precio_total': precio_t if precio_t > 0 else precio_u * cant
-                    })
+            for line in lines:
+                line_stripped = line.strip()
+                upper = line_stripped.upper()
+
+                # Detect start of items section
+                if "ITEM" in upper and "DESCRIPCION" in upper:
+                    in_items = True
+                    continue
+
+                # Detect end of items section
+                if in_items and ("SUB-TOTAL" in upper or "SUBTOTAL" in upper or
+                                  "OBSERVACIONES" in upper or "OFERTA VALIDA" in upper):
+                    in_items = False
+                    continue
+
+                if not in_items:
+                    continue
+
+                # Skip empty lines
+                if not line_stripped:
+                    continue
+
+                # CONICO line format:
+                # DESCRIPCION CANT PRECIO TOTAL
+                # e.g.: EQUIPO HP DT 400 G9 SFF... 1.00 C$32,739.40 C$32,739.40
+                # Also handle: LAPTOP MSI... 1.00 C$66,289.06 C$66,289.06
+                m = re.match(
+                    r'^(.*?)\s+(\d+\.?\d*)\s+C\$([\d,]+\.\d{2})\s+C\$([\d,]+\.\d{2})$',
+                    line_stripped
+                )
+                # Also try: line starts directly with quantity + prices (desc on previous line)
+                # e.g.: "1.00 C$66,289.06 C$66,289.06"
+                if not m:
+                    m2 = re.match(
+                        r'^(\d+\.?\d*)\s+C\$([\d,]+\.\d{2})\s+C\$([\d,]+\.\d{2})$',
+                        line_stripped
+                    )
+                    if m2:
+                        # Use pending_desc as the description
+                        desc = pending_desc.strip() if pending_desc else ""
+                        pending_desc = ""
+                        cant = float(m2.group(1))
+                        precio_u = self._clean_price(m2.group(2))
+                        precio_t = self._clean_price(m2.group(3))
+
+                        if desc and precio_u > 0:
+                            items.append({
+                                'descripcion': desc,
+                                'cantidad': int(cant) if cant == int(cant) else cant,
+                                'precio_unitario': precio_u,
+                                'precio_total': precio_t if precio_t > 0 else precio_u * cant
+                            })
+                        continue
+
+                if m:
+                    desc = m.group(1).strip()
+                    # Prepend any pending multi-line description
+                    if pending_desc:
+                        desc = pending_desc + " " + desc
+                        pending_desc = ""
+                    cant = float(m.group(2))
+                    precio_u = self._clean_price(m.group(3))
+                    precio_t = self._clean_price(m.group(4))
+
+                    if desc and precio_u > 0:
+                        items.append({
+                            'descripcion': desc,
+                            'cantidad': int(cant) if cant == int(cant) else cant,
+                            'precio_unitario': precio_u,
+                            'precio_total': precio_t if precio_t > 0 else precio_u * cant
+                        })
+                        pending_desc = ""  # Reset after successful item
+                else:
+                    # Line without prices could be a continuation of description
+                    # or a trailing model number after the price line (e.g. "B14WEK")
+                    skip_words_desc = ["OBSERVACIONES", "OFERTA", "TIEMPO", "ELABORAR",
+                                       "SE NOS", "T/C", "LOS PRECIOS", "GARANTIA",
+                                       "SUB-TOTAL", "SUBTOTAL", "CONDICIONES",
+                                       "DESCUENTO", "NETO", "ELABORAR CK"]
+                    if line_stripped and not any(skip in upper for skip in skip_words_desc):
+                        # If we just added an item and this line looks like a model/part suffix,
+                        # append it to the last item's description
+                        if items and not pending_desc and len(line_stripped) < 30 and not re.search(r'C\$', line_stripped):
+                            items[-1]['descripcion'] += " " + line_stripped
+                        else:
+                            pending_desc = (pending_desc + " " + line_stripped).strip() if pending_desc else line_stripped
 
         return items
 
@@ -332,8 +433,116 @@ class ProformaParser:
     # SEVASA Parser (generic/similar to CONICO)
     # ─────────────────────────────────────────────
     def _parse_sevasa(self, text: str, tables: list) -> list:
-        """Parse SEVASA proforma items. Uses generic approach."""
-        return self._parse_generic(text, tables)
+        """Parse SEVASA proforma items with dedicated parser."""
+        items = []
+
+        # Summary/footer patterns to skip
+        summary_patterns = [
+            'SUB TOTAL', 'SUB-TOTAL', 'SUBTOTAL', 'TOTAL C$', 'TOTAL C',
+            'IVA ', 'IVA%', 'IVA1', 'FORMA DE PAGO', 'FORMA PAGO',
+            'CONDICIONES', 'ELABORAR CK', 'ELABORAR CH',
+            'CK A NOMBRE', 'CHEQUE A NOMBRE', 'PAGOS SOLO',
+            'SOMOS EXENTOS', 'SOMOS GRANDES', 'NOS RETIENEN',
+            'SE NOS RETIENE', 'TIEMPO DE ENTREGA', 'CONTADO',
+            'CREDITO', 'TRANSFERENCIA', 'DESCUENTO APLICADO',
+            'MONTO EN LETRAS', 'LOS PRECIOS', 'PRECIOS EXPRESADOS',
+            'GARANTIA', 'GARANTÍA', 'VIGENCIA', 'OFERTA VALIDA',
+            'TERMINOS', 'TÉRMINOS', 'OBSERVACIONES',
+        ]
+
+        # SEVASA: Prefer text-based parsing because pdfplumber often splits
+        # product names across multiple columns incorrectly
+        lines = text.split('\n')
+        for line in lines:
+            line_stripped = line.strip()
+            upper = line_stripped.upper()
+
+            # Skip summary/footer lines
+            if any(pat in upper for pat in summary_patterns):
+                continue
+
+            # Look for lines with C$ prices:
+            # Format: CANT DESCRIPTION C$ PRICE C$ PRICE
+            m = re.match(
+                r'^(\d+)\s+(.*?)\s+C\$\s*([\d,]+\.\d{2})\s+C\$\s*([\d,]+\.\d{2})$',
+                line_stripped
+            )
+            if m:
+                cant = int(m.group(1))
+                desc = m.group(2).strip()
+                precio_u = self._clean_price(m.group(3))
+                precio_t = self._clean_price(m.group(4))
+                # Skip if description is a summary word
+                desc_upper = desc.upper()
+                if any(pat in desc_upper for pat in summary_patterns):
+                    continue
+                if desc and precio_u > 0:
+                    items.append({
+                        'descripcion': desc,
+                        'cantidad': cant,
+                        'precio_unitario': precio_u,
+                        'precio_total': precio_t
+                    })
+
+        # Fallback to table-based parsing if text didn't yield results
+        if not items and tables:
+            for table in tables:
+                for row in table:
+                    if row is None:
+                        continue
+                    row_str = [str(c).split('\n')[0].strip() if c else "" for c in row]
+                    joined = " ".join(row_str).upper()
+
+                    # Skip headers
+                    if any(skip in joined for skip in ["CANT.", "DESCRIPCI", "P. UNIT", "P.TOTAL",
+                                                        "CÓDIGO", "CODIGO"]):
+                        continue
+
+                    # Skip empty rows
+                    if all(c == "" for c in row_str):
+                        continue
+
+                    # Check for summary/footer patterns in the row
+                    if any(pat in joined for pat in summary_patterns):
+                        continue
+
+                    # Look for rows that have prices (actual product rows)
+                    prices = []
+                    desc_parts = []
+                    cant = 1
+
+                    for i, cell in enumerate(row_str):
+                        cell = cell.strip()
+                        if not cell:
+                            continue
+                        price_val = self._clean_price(cell)
+                        if price_val > 10:
+                            prices.append(price_val)
+                        elif re.match(r'^\d+$', cell):
+                            cant = int(cell)
+                        elif not re.match(r'^[\d.,\s]+$', cell):
+                            desc_upper = cell.upper()
+                            # Skip if it's a summary word
+                            if desc_upper in ('TOTAL', 'SUBTOTAL', 'SUB-TOTAL', 'SUB TOTAL',
+                                              'IVA', 'DESCUENTO', 'MONEDA', 'NETO'):
+                                continue
+                            if any(desc_upper.startswith(pat) or pat in desc_upper
+                                   for pat in summary_patterns):
+                                continue
+                            if len(cell) > 2:
+                                desc_parts.append(cell)
+
+                    desc = " ".join(desc_parts).strip()
+
+                    if desc and len(prices) >= 1:
+                        items.append({
+                            'descripcion': desc,
+                            'cantidad': cant,
+                            'precio_unitario': prices[0],
+                            'precio_total': prices[-1] if len(prices) > 1 else prices[0] * cant
+                        })
+
+        return items
 
     # ─────────────────────────────────────────────
     # Generic Parser (fallback)
@@ -362,7 +571,7 @@ class ProformaParser:
 
                     # Skip obvious non-data rows (only if ALL content is header/footer)
                     skip_words = ["CÓDIGO", "CODIGO", "DESCRIPCIÓN", "DESCRIPCION",
-                                  "SUB-TOTAL", "SUBTOTAL", "CONDICIONES",
+                                  "SUB-TOTAL", "SUBTOTAL", "SUB TOTAL", "CONDICIONES",
                                   "GARANTÍA", "GARANTIA", "TERMINOS"]
                     # Only skip if the row starts with or is primarily a header
                     # Don't skip rows that have a product code in the first cell
@@ -396,10 +605,27 @@ class ProformaParser:
                             desc_parts.append(cell)
 
                     desc = " ".join(desc_parts).strip()
-                    # Filter out rows where description is just a summary word
+                    # Filter out rows where description is a summary/footer line
                     desc_upper = desc.upper()
-                    if desc_upper in ('TOTAL', 'SUBTOTAL', 'SUB-TOTAL', 'IVA',
-                                      'DESCUENTO', 'MONEDA', 'CORDOBAS'):
+                    # Exact matches for common summary words
+                    if desc_upper in ('TOTAL', 'SUBTOTAL', 'SUB-TOTAL', 'SUB TOTAL', 'IVA',
+                                      'DESCUENTO', 'MONEDA', 'CORDOBAS', 'NETO'):
+                        continue
+                    # Substring/starts-with matching for summary lines
+                    summary_patterns = [
+                        'SUB TOTAL', 'SUB-TOTAL', 'SUBTOTAL', 'TOTAL C$', 'TOTAL C',
+                        'IVA ', 'IVA%', 'IVA1', 'FORMA DE PAGO', 'FORMA PAGO',
+                        'CONDICIONES', 'ELABORAR CK', 'ELABORAR CH',
+                        'CK A NOMBRE', 'CHEQUE A NOMBRE', 'PAGOS SOLO',
+                        'SOMOS EXENTOS', 'SOMOS GRANDES', 'NOS RETIENEN',
+                        'SE NOS RETIENE', 'TIEMPO DE ENTREGA', 'CONTADO',
+                        'CREDITO', 'TRANSFERENCIA', 'DESCUENTO APLICADO',
+                        'MONTO EN LETRAS', 'LOS PRECIOS', 'PRECIOS EXPRESADOS',
+                        'GARANTIA', 'GARANTÍA', 'VIGENCIA', 'OFERTA VALIDA',
+                        'TERMINOS', 'TÉRMINOS', 'OBSERVACIONES',
+                    ]
+                    if any(desc_upper.startswith(pat) or pat in desc_upper
+                           for pat in summary_patterns):
                         continue
                     if desc and len(prices) >= 1:
                         items.append({

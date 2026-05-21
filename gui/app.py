@@ -346,38 +346,116 @@ class ProformaApp(ctk.CTk):
             # Build table data — group similar items across suppliers
             table_items = []
 
-            def _normalize(desc: str) -> set:
-                """Extract meaningful keywords from a description for matching."""
-                import re as _re
+            import re as _re
+
+            def _extract_models(desc: str) -> set:
+                """Extract model/part numbers from a description."""
                 text = desc.upper().strip()
-                # Remove common noise: model suffixes like #ABC-123, parenthesized text
-                text = _re.sub(r'#\S+', '', text)
+                models = set()
+                # Match patterns like ARG-CB-0055, FUB-1290, AGI-1210, XTC-376, etc.
+                for m in _re.finditer(r'[A-Z]{2,}[\-][A-Z0-9]{1,}[\-]?[A-Z0-9]*', text):
+                    val = m.group()
+                    # Filter out false positives like MACHO-MACHO, PASTA-TERMICA
+                    parts = val.split('-')
+                    # Real model numbers have at least one part with digits
+                    if any(any(c.isdigit() for c in p) for p in parts):
+                        models.add(val)
+                # Match patterns like #FUB-1290 or #DTX/64GB (strip the #)
+                for m in _re.finditer(r'#([A-Z0-9][\w\-/]+)', text):
+                    models.add(m.group(1))
+                return models
+
+            def _model_fragments(models: set) -> set:
+                """Get individual tokens that make up model numbers."""
+                frags = set()
+                for model in models:
+                    for part in _re.split(r'[\-/]+', model):
+                        if len(part) > 1:
+                            frags.add(part)
+                return frags
+
+            def _normalize(desc: str, model_frags: set = None) -> set:
+                """Extract meaningful keywords from a description for matching."""
+                text = desc.upper().strip()
+                # Remove parenthesized text
                 text = _re.sub(r'\([^)]*\)', '', text)
-                # Split on spaces, slashes, commas
+                # Remove # prefixed model numbers entirely
+                text = _re.sub(r'#\S+', '', text)
+                # Split combined tokens like "30GMS" -> "30" + "GMS"
+                text = _re.sub(r'(\d+)([A-Z])', r'\1 \2', text)
+                text = _re.sub(r'([A-Z])(\d+)', r'\1 \2', text)
+                # Split on spaces, slashes, commas, dashes
                 tokens = _re.split(r'[\s/,\-]+', text)
-                # Keep tokens that are meaningful (length > 1, not pure punctuation)
                 stop_words = {'DE', 'A', 'Y', 'EL', 'LA', 'LOS', 'LAS', 'EN', 'CON',
                               'P', 'PARA', 'UN', 'UNA', 'DEL', 'AL', 'POR', 'SU',
-                              'C$', 'CS', 'UND', 'UNIDAD'}
+                              'C$', 'CS', 'UND', 'UNIDAD', 'TO', 'NO'}
                 keywords = set()
                 for t in tokens:
-                    t = t.strip('.,;:!?()[]{}')
+                    t = t.strip('.,;:!?()[]{}#')
                     if len(t) > 1 and t not in stop_words:
+                        # Skip tokens that are fragments of model numbers
+                        # (e.g. "ARG", "CB", "0055" from "ARG-CB-0055")
+                        if model_frags and t in model_frags:
+                            continue
                         keywords.add(t)
                 return keywords
 
-            def _similarity(kw1: set, kw2: set) -> float:
-                """Jaccard-like similarity between two keyword sets."""
+            def _get_category(keywords: set) -> str:
+                """Detect the product category from keywords."""
+                cats = {
+                    'ACUMULADOR': 'BATERIA', 'BATERIA': 'BATERIA',
+                    'CABLE': 'CABLE', 'ADAPTADOR': 'ADAPTADOR',
+                    'MEMORIA': 'MEMORIA', 'USB': 'MEMORIA',
+                    'PASTA': 'PASTA', 'TERMICA': 'PASTA',
+                    'TECLADO': 'TECLADO', 'MOUSE': 'MOUSE',
+                    'MONITOR': 'MONITOR', 'DISCO': 'DISCO',
+                    'IMPRESORA': 'IMPRESORA', 'TONER': 'TONER',
+                }
+                for kw in keywords:
+                    if kw in cats:
+                        return cats[kw]
+                return 'OTHER'
+
+            def _models_match(models1: set, models2: set) -> bool:
+                """Check if any model from set1 matches or is a prefix of any model in set2."""
+                for m1 in models1:
+                    for m2 in models2:
+                        if m1 == m2 or m1.startswith(m2) or m2.startswith(m1):
+                            return True
+                return False
+
+            def _similarity(kw1: set, kw2: set, models1: set, models2: set) -> float:
+                """Smart similarity: uses model numbers + asymmetric keyword matching."""
                 if not kw1 or not kw2:
                     return 0.0
-                intersection = kw1 & kw2
-                union = kw1 | kw2
-                return len(intersection) / len(union)
 
-            SIMILARITY_THRESHOLD = 0.45  # 45% keyword overlap to be considered same product
+                # TIER 1: Model number match or prefix match (handles truncated PDFs)
+                if models1 and models2:
+                    if _models_match(models1, models2):
+                        return 1.0  # Definite match
+                    else:
+                        return 0.0  # Different models → different products
+
+                # TIER 2: Asymmetric containment — check if the smaller set
+                # is mostly contained in the larger set. This handles cases like:
+                # "CABLE HDMI 50FT MACHO" (4 kw) vs
+                # "CABLE DE VIDEO HDMI ARGOM 50FT MACHO-MACHO / ARG-CB-1879" (8 kw)
+                smaller = kw1 if len(kw1) <= len(kw2) else kw2
+                larger = kw1 if len(kw1) > len(kw2) else kw2
+                intersection = smaller & larger
+                containment = len(intersection) / len(smaller) if smaller else 0
+                jaccard = len(intersection) / len(smaller | larger)
+
+                # Use the better of jaccard or containment (weighted)
+                return max(jaccard, containment * 0.75)
+
+            SIMILARITY_THRESHOLD = 0.40
 
             for item in result['all_items']:
-                item_kw = _normalize(item['descripcion'])
+                item_models = _extract_models(item['descripcion'])
+                item_frags = _model_fragments(item_models)
+                item_kw = _normalize(item['descripcion'], item_frags)
+                item_cat = _get_category(item_kw)
 
                 # Find best matching existing row
                 best_match = None
@@ -386,7 +464,12 @@ class ProformaApp(ctk.CTk):
                     # Don't match if this supplier already has a price in that row
                     if item['proveedor'] in t['precios']:
                         continue
-                    score = _similarity(item_kw, t['_keywords'])
+                    # Don't match across different product categories
+                    if item_cat != 'OTHER' and t.get('_category', 'OTHER') != 'OTHER':
+                        if item_cat != t['_category']:
+                            continue
+                    score = _similarity(item_kw, t['_keywords'],
+                                        item_models, t.get('_models', set()))
                     if score > best_score:
                         best_score = score
                         best_match = t
@@ -395,6 +478,9 @@ class ProformaApp(ctk.CTk):
                     # Merge into existing row
                     best_match['precios'][item['proveedor']] = item['precio_unitario']
                     best_match['cantidad'] = max(best_match['cantidad'], item['cantidad'])
+                    # Merge keywords and models for better future matching
+                    best_match['_keywords'] = best_match['_keywords'] | item_kw
+                    best_match['_models'] = best_match.get('_models', set()) | item_models
                     # Keep the longest description as the canonical name
                     if len(item['descripcion']) > len(best_match['descripcion']):
                         best_match['descripcion'] = item['descripcion']
@@ -404,11 +490,15 @@ class ProformaApp(ctk.CTk):
                         'precios': {item['proveedor']: item['precio_unitario']},
                         'cantidad': item['cantidad'],
                         '_keywords': item_kw,
+                        '_models': item_models,
+                        '_category': item_cat,
                     })
 
             # Clean up internal keys before passing to table
             for t in table_items:
                 t.pop('_keywords', None)
+                t.pop('_models', None)
+                t.pop('_category', None)
 
             self.data_table.load_data(table_items)
             self._log(f"\n📊 {len(table_items)} artículo(s) cargados en la tabla.")
