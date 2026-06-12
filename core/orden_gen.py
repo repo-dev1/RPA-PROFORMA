@@ -57,7 +57,8 @@ def generate_orden_compra(
     import shutil
     
     # Locate the template file
-    template_files = glob.glob(os.path.join("templates", "OC*.xlsx"))
+    res_dir = os.environ.get('PROFORMA_RESOURCE_DIR', os.getcwd())
+    template_files = glob.glob(os.path.join(res_dir, "templates", "OC*.xlsx"))
     if not template_files:
         raise FileNotFoundError("No se encontró ninguna plantilla que empiece con 'OC' en la carpeta templates.")
     

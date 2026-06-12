@@ -531,7 +531,8 @@ class ProformaApp(ctk.CTk):
             return
 
         title = self.title_entry.get().strip() or "PRODUCTOS VARIOS"
-        logo_path = os.path.join(os.getcwd(), "templates", "logo_aconic.png")
+        res_dir = os.environ.get('PROFORMA_RESOURCE_DIR', os.getcwd())
+        logo_path = os.path.join(res_dir, "templates", "logo_aconic.png")
         out_dir = os.environ.get('PROFORMA_OUTPUT_DIR', os.path.join(os.getcwd(), 'output'))
         output_path = os.path.join(out_dir, "Cuadro_Comparativo.xlsx")
 
@@ -605,7 +606,8 @@ class ProformaApp(ctk.CTk):
         tipo = self.oc_entries.get("Tipo de Compra:", None)
         autoriza = self.oc_entries.get("Autoriza:", None)
 
-        logo_path = os.path.join(os.getcwd(), "templates", "logo_aconic.png")
+        res_dir = os.environ.get('PROFORMA_RESOURCE_DIR', os.getcwd())
+        logo_path = os.path.join(res_dir, "templates", "logo_aconic.png")
         out_dir = os.environ.get('PROFORMA_OUTPUT_DIR', os.path.join(os.getcwd(), 'output'))
         output_path = os.path.join(out_dir, f"Orden_Compra_{supplier}.xlsx")
 

@@ -21,6 +21,12 @@ def get_base_dir():
 
 def main():
     base_dir = get_base_dir()
+    
+    # Set resource dir for pyinstaller bundles
+    if getattr(sys, 'frozen', False):
+        os.environ['PROFORMA_RESOURCE_DIR'] = sys._MEIPASS
+    else:
+        os.environ['PROFORMA_RESOURCE_DIR'] = base_dir
 
     # Parse --output-dir argument for network deployment
     output_dir = None
