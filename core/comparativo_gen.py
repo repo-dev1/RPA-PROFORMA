@@ -102,9 +102,10 @@ def generate_comparativo(
     if logo_path and os.path.exists(logo_path):
         try:
             img = XlImage(logo_path)
-            img.width = 100
-            img.height = 100
-            ws.add_image(img, 'B2')
+            # Size to cover columns A-B, rows 1-6 (before PROVEEDORES header)
+            img.width = 300
+            img.height = 145
+            ws.add_image(img, 'A1')
         except Exception as e:
             print(f"Warning: Could not add logo: {e}")
 

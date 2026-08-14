@@ -25,6 +25,11 @@ class EditableTable(tk.Frame):
         self._editing_item = None
         self._editing_column = None
 
+        # Drag-and-drop state
+        self._drag_item = None
+        self._drag_start_y = 0
+        self._drag_active = False
+
         self._setup_ui()
 
     def _setup_ui(self):
@@ -100,11 +105,191 @@ class EditableTable(tk.Frame):
         # Bind double-click for editing
         self.tree.bind("<Double-1>", self._on_double_click)
 
+        # Bind drag-and-drop for row reordering
+        self.tree.bind("<ButtonPress-1>", self._on_drag_start)
+        self.tree.bind("<B1-Motion>", self._on_drag_motion)
+        self.tree.bind("<ButtonRelease-1>", self._on_drag_end)
+
         # Alternating row colors
         self.tree.tag_configure("even", background=COLORS["table_row_even"])
         self.tree.tag_configure("odd", background=COLORS["table_row_odd"])
         self.tree.tag_configure("empty_price", foreground=COLORS["text_muted"])
+        # Faded look for the source row while dragging
+        self.tree.tag_configure("drag_ghost", background="#0d1525", foreground="#3a4560")
 
+        # Drop-indicator line (hidden initially)
+        self._drop_line = tk.Frame(self, bg=COLORS["accent"], height=3)
+        self._drop_line.place_forget()
+
+    # ── Drag-and-drop row reordering ─────────────────────────────────────
+    def _on_drag_start(self, event):
+        """Begin drag if clicking on a data row (not header)."""
+        region = self.tree.identify_region(event.x, event.y)
+        if region not in ("cell", "tree"):
+            return
+
+        item_id = self.tree.identify_row(event.y)
+        if not item_id:
+            return
+
+        self._drag_item = item_id
+        self._drag_start_y = event.y
+        self._drag_active = False
+
+    def _create_ghost_row(self):
+        """Create a floating semi-transparent copy of the dragged row."""
+        values = self.tree.item(self._drag_item, "values")
+        # Build a text representation: "#  Description  ...prices  qty"
+        desc = str(values[1]) if len(values) > 1 else ""
+        # Truncate long descriptions
+        if len(desc) > 55:
+            desc = desc[:52] + "..."
+        display_text = f"  {values[0]}   {desc}"
+
+        # Create a borderless toplevel window
+        ghost = tk.Toplevel(self)
+        ghost.overrideredirect(True)
+        ghost.attributes("-alpha", 0.80)
+        # Prevent it from taking focus
+        ghost.attributes("-topmost", True)
+        ghost.configure(bg="#1a3a5c")
+
+        # Content frame with border effect
+        frame = tk.Frame(ghost, bg="#1a3a5c", padx=2, pady=2)
+        frame.pack(fill="both", expand=True)
+
+        inner = tk.Frame(frame, bg="#162d4a")
+        inner.pack(fill="both", expand=True)
+
+        # Row text
+        lbl = tk.Label(
+            inner,
+            text=display_text,
+            font=("Segoe UI", 10),
+            bg="#162d4a",
+            fg="#93c5fd",
+            anchor="w",
+            padx=10,
+            pady=6,
+        )
+        lbl.pack(fill="both", expand=True)
+
+        # Size the ghost to match the treeview width
+        tree_width = self.tree.winfo_width()
+        ghost.geometry(f"{min(tree_width, 650)}x35")
+
+        return ghost
+
+    def _on_drag_motion(self, event):
+        """Track mouse movement; show ghost row and drop indicator."""
+        if not self._drag_item:
+            return
+
+        # Require minimum movement before activating (avoids
+        # interfering with normal click/selection)
+        if not self._drag_active:
+            if abs(event.y - self._drag_start_y) < 8:
+                return
+            self._drag_active = True
+            self.tree.configure(cursor="sb_v_double_arrow")
+
+            # Cancel any active cell edit
+            self._cancel_edit()
+
+            # Fade out the source row
+            self.tree.item(self._drag_item, tags=("drag_ghost",))
+
+            # Create the floating ghost row
+            self._ghost_window = self._create_ghost_row()
+
+        # ── Move ghost window to follow cursor ──
+        if hasattr(self, '_ghost_window') and self._ghost_window:
+            # Position ghost slightly to the right and below cursor
+            abs_x = self.tree.winfo_rootx() + 12
+            abs_y = event.y_root - 16
+            self._ghost_window.geometry(f"+{abs_x}+{abs_y}")
+
+        # ── Show drop indicator line ──
+        target_id = self.tree.identify_row(event.y)
+        children = list(self.tree.get_children())
+
+        if target_id and target_id != self._drag_item:
+            # Get the bounding box of the target row
+            bbox = self.tree.bbox(target_id)
+            if bbox:
+                tx, ty, tw, th = bbox
+                target_idx = children.index(target_id)
+                drag_idx = children.index(self._drag_item)
+
+                # Place the line above or below the target depending
+                # on drag direction
+                if drag_idx < target_idx:
+                    # Dragging down → line at bottom of target
+                    line_y = ty + th - 2
+                else:
+                    # Dragging up → line at top of target
+                    line_y = ty
+
+                # Position the drop indicator line inside the treeview
+                tree_x = self.tree.winfo_x()
+                tree_y = self.tree.winfo_y()
+                self._drop_line.place(
+                    x=tree_x + tx,
+                    y=tree_y + line_y,
+                    width=tw,
+                    height=3,
+                )
+                self._drop_line.lift()
+        else:
+            self._drop_line.place_forget()
+
+        # Restore alternating colors for non-dragged rows
+        for idx, child in enumerate(children):
+            if child == self._drag_item:
+                continue  # keep faded
+            tag = "even" if idx % 2 == 0 else "odd"
+            self.tree.item(child, tags=(tag,))
+
+    def _on_drag_end(self, event):
+        """Drop the row at the new position."""
+        if not self._drag_item:
+            return
+
+        if self._drag_active:
+            # Destroy the ghost window
+            if hasattr(self, '_ghost_window') and self._ghost_window:
+                self._ghost_window.destroy()
+                self._ghost_window = None
+
+            # Hide the drop indicator
+            self._drop_line.place_forget()
+
+            target_id = self.tree.identify_row(event.y)
+
+            if target_id and target_id != self._drag_item:
+                children = list(self.tree.get_children())
+                target_idx = children.index(target_id)
+
+                # Move the row
+                self.tree.move(self._drag_item, "", target_idx)
+
+                # Renumber and recolor rows
+                self._renumber_rows()
+
+                if self.on_data_changed:
+                    self.on_data_changed()
+            else:
+                # No valid drop — just restore colors
+                self._renumber_rows()
+
+            self.tree.configure(cursor="")
+
+        # Reset drag state
+        self._drag_item = None
+        self._drag_start_y = 0
+        self._drag_active = False
+
+    # ── Double-click editing ─────────────────────────────────────────────
     def _on_double_click(self, event):
         """Handle double-click to start in-place editing."""
         region = self.tree.identify_region(event.x, event.y)

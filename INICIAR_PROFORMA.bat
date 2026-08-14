@@ -71,7 +71,7 @@ if not exist "%LOCAL_DIR%\%EXE_FOLDER%" mkdir "%LOCAL_DIR%\%EXE_FOLDER%"
 
 REM ── Copiar con ROBOCOPY (solo archivos nuevos/cambiados) ───
 echo   Copiando archivos (solo los nuevos o modificados)...
-robocopy "%NETWORK_DIR%%EXE_FOLDER%" "%LOCAL_DIR%\%EXE_FOLDER%" /E /NFL /NDL /NJH /NJS /NC /NS /NP
+robocopy "%NETWORK_DIR%%EXE_FOLDER%" "%LOCAL_DIR%\%EXE_FOLDER%" /E /PURGE /NFL /NDL /NJH /NJS /NC /NS /NP
 REM robocopy retorna 0-7 como exito
 if %ERRORLEVEL% GEQ 8 (
     echo   [ERROR] Fallo al copiar archivos.

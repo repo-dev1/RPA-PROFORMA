@@ -4,8 +4,9 @@ Provides visual file slots for each supplier with drag support.
 """
 
 import os
+import subprocess
 import customtkinter as ctk
-from tkinter import filedialog
+from tkinter import filedialog, messagebox
 from gui.styles import COLORS, FONTS, SUPPLIER_COLORS, DIMENSIONS
 
 
@@ -32,6 +33,20 @@ class PDFSlot(ctk.CTkFrame):
 
     def _setup_ui(self):
         """Build the slot UI."""
+        # Print button — top-right corner (placed absolutely)
+        self.print_btn = ctk.CTkButton(
+            self,
+            text="🖨️",
+            font=ctk.CTkFont(size=14),
+            fg_color="transparent",
+            hover_color=COLORS["surface_hover"],
+            height=28,
+            width=28,
+            corner_radius=6,
+            command=self._print_file,
+        )
+        self.print_btn.place(relx=1.0, x=-8, y=8, anchor="ne")
+
         # Supplier badge
         self.badge = ctk.CTkLabel(
             self,
@@ -90,6 +105,20 @@ class PDFSlot(ctk.CTkFrame):
         if filepath:
             self.set_file(filepath)
 
+    def _print_file(self):
+        """Print the loaded PDF using the default printer."""
+        if not self.filepath or not os.path.exists(self.filepath):
+            messagebox.showinfo("Sin archivo", "Primero carga un PDF para imprimir.")
+            return
+
+        try:
+            # Use Windows ShellExecute "print" verb for default printer
+            os.startfile(self.filepath, "print")
+            messagebox.showinfo("Imprimiendo",
+                                f"Enviando a la impresora predeterminada:\n{os.path.basename(self.filepath)}")
+        except Exception as e:
+            messagebox.showerror("Error de impresión", f"No se pudo imprimir:\n{e}")
+
     def set_file(self, filepath: str):
         """Set the loaded file path and update UI."""
         self.filepath = filepath
@@ -100,7 +129,24 @@ class PDFSlot(ctk.CTkFrame):
             text_color=COLORS["text_primary"],
         )
         self.status_label.configure(text="✅")
-        self.configure(border_color=self.supplier_color)
+
+        # Auto-detect supplier
+        from core.pdf_parser import detect_supplier_from_pdf
+        detected = detect_supplier_from_pdf(filepath)
+        if detected and detected != "DESCONOCIDO":
+            old_name = self.supplier_name
+            self.supplier_name = detected
+            self.badge.configure(text=self.supplier_name)
+            
+            self.supplier_color = SUPPLIER_COLORS.get(detected, COLORS["accent"])
+            self.badge.configure(fg_color=self.supplier_color)
+            self.load_btn.configure(fg_color=self.supplier_color)
+            self.configure(border_color=self.supplier_color)
+            
+            if self.on_supplier_renamed:
+                self.on_supplier_renamed(old_name, detected)
+        else:
+            self.configure(border_color=self.supplier_color)
 
         if self.on_file_loaded:
             self.on_file_loaded(self.supplier_name, filepath)
@@ -176,9 +222,22 @@ class PDFLoaderPanel(ctk.CTkFrame):
             self.slots[supplier] = slot
 
     def _on_supplier_renamed(self, old_name: str, new_name: str):
-        if old_name in self.slots:
-            slot = self.slots.pop(old_name)
-            self.slots[new_name] = slot
+        if old_name not in self.slots:
+            return
+            
+        original_new_name = new_name
+        counter = 1
+        while new_name in self.slots and new_name != old_name:
+            new_name = f"{original_new_name} {counter}"
+            counter += 1
+            
+        slot = self.slots.pop(old_name)
+        
+        if new_name != original_new_name:
+            slot.supplier_name = new_name
+            slot.badge.configure(text=new_name)
+            
+        self.slots[new_name] = slot
             
         for i, s in enumerate(self.suppliers):
             if s == old_name:

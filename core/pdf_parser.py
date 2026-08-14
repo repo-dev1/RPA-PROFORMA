@@ -120,6 +120,46 @@ class ProformaParser:
         except (ValueError, TypeError):
             return 0.0
 
+    def _clean_garbled_text(self, text: str) -> str:
+        """Clean garbled text where pdfplumber separates characters with spaces.
+        
+        Example: '8GB 51 2 S S D P R O S L I' -> '8GB 512SSD PRO SLI'
+        
+        Strategy: find sequences of single characters (or digits) separated by
+        spaces and join them together. A 'garbled segment' is 2+ consecutive
+        single-char tokens.
+        """
+        if not text:
+            return text
+
+        tokens = text.split(' ')
+        result = []
+        garbled_buffer = []
+
+        for token in tokens:
+            if len(token) <= 1 and token != '':
+                # Single character — likely part of garbled text
+                garbled_buffer.append(token)
+            else:
+                # Multi-char token — flush any garbled buffer first
+                if len(garbled_buffer) >= 2:
+                    # Join garbled characters together
+                    result.append(''.join(garbled_buffer))
+                elif garbled_buffer:
+                    # Too few single chars to be garbled, keep as-is
+                    result.extend(garbled_buffer)
+                garbled_buffer = []
+                if token:
+                    result.append(token)
+
+        # Flush remaining buffer
+        if len(garbled_buffer) >= 2:
+            result.append(''.join(garbled_buffer))
+        elif garbled_buffer:
+            result.extend(garbled_buffer)
+
+        return ' '.join(result)
+
     # ─────────────────────────────────────────────
     # MASTERTEC Parser
     # ─────────────────────────────────────────────
@@ -448,10 +488,11 @@ class ProformaParser:
             'MONTO EN LETRAS', 'LOS PRECIOS', 'PRECIOS EXPRESADOS',
             'GARANTIA', 'GARANTÍA', 'VIGENCIA', 'OFERTA VALIDA',
             'TERMINOS', 'TÉRMINOS', 'OBSERVACIONES',
+            'CONCEPTO', 'COTIZACION EN', 'GRAN TOTAL', 'TOTAL IMPUESTO',
+            'NUMERO DE REGISTROS', 'PAG.NO', 'PAG NO',
         ]
 
-        # SEVASA: Prefer text-based parsing because pdfplumber often splits
-        # product names across multiple columns incorrectly
+        # ── Attempt 1: Text-based parsing with C$ prices ──
         lines = text.split('\n')
         for line in lines:
             line_stripped = line.strip()
@@ -472,7 +513,6 @@ class ProformaParser:
                 desc = m.group(2).strip()
                 precio_u = self._clean_price(m.group(3))
                 precio_t = self._clean_price(m.group(4))
-                # Skip if description is a summary word
                 desc_upper = desc.upper()
                 if any(pat in desc_upper for pat in summary_patterns):
                     continue
@@ -484,8 +524,176 @@ class ProformaParser:
                         'precio_total': precio_t
                     })
 
-        # Fallback to table-based parsing if text didn't yield results
-        if not items and tables:
+        if items:
+            return items
+
+        # ── Attempt 1b: Text-based parsing WITHOUT C$ prefix (SEVASA format) ──
+        # Format: CODE DESCRIPTION QUANTITY PRICE TOTAL
+        # e.g.: 4945 COMPUTADORA DELL CI5-14500 8GB 512SSD PRO SLI 1.00 36,074.94 36,074.94
+        # Note: pdfplumber may garble text with spaces between chars
+        in_items = False
+        for line in lines:
+            line_stripped = line.strip()
+            upper = line_stripped.upper()
+
+            # Detect header row to know where items start
+            if ('CODIGO' in upper or 'CÓDIGO' in upper) and ('NOMBRE' in upper or 'PRECIO' in upper):
+                in_items = True
+                continue
+
+            # Skip summary/footer lines — stop parsing items
+            if any(pat in upper for pat in summary_patterns):
+                if in_items:
+                    in_items = False
+                continue
+
+            if not in_items or not line_stripped:
+                continue
+
+            # Match: CODE DESCRIPTION QUANTITY UNIT_PRICE TOTAL_PRICE
+            # The code is numeric, quantity is like 1.00, prices are like 36,074.94
+            m = re.match(
+                r'^(\d{2,})\s+(.*?)\s+(\d+\.?\d*)\s+([\d,]+\.\d{2})\s+([\d,]+\.\d{2})$',
+                line_stripped
+            )
+            if m:
+                desc = m.group(2).strip()
+                cant = self._clean_price(m.group(3))
+                precio_u = self._clean_price(m.group(4))
+                precio_t = self._clean_price(m.group(5))
+
+                # Clean garbled text: remove single-char spacing artifacts
+                # e.g. "8GB 51 2 S S D P R O S L I" -> "8GB 512SSD PRO SLI"
+                desc = self._clean_garbled_text(desc)
+
+                desc_upper = desc.upper()
+                if any(pat in desc_upper for pat in summary_patterns):
+                    continue
+
+                if desc and precio_u > 0:
+                    if cant == 0:
+                        cant = 1
+                    items.append({
+                        'descripcion': desc,
+                        'cantidad': int(cant) if cant == int(cant) else cant,
+                        'precio_unitario': precio_u,
+                        'precio_total': precio_t if precio_t > 0 else precio_u * cant
+                    })
+
+        if items:
+            return items
+
+        # ── Attempt 2: Structured table parsing ──
+        # SEVASA table format: Código | Nombre | U/M | Unidades | Precio | Total
+        if tables:
+            for table in tables:
+                if not table or len(table) < 2:
+                    continue
+
+                # Try to find header row and identify column indices
+                header_row_idx = -1
+                col_nombre = -1
+                col_unidades = -1
+                col_precio = -1
+                col_total = -1
+                col_codigo = -1
+
+                for ri, row in enumerate(table):
+                    if row is None:
+                        continue
+                    row_upper = [str(c).upper().strip() if c else "" for c in row]
+                    joined = " ".join(row_upper)
+
+                    # Look for header row with column names
+                    has_nombre = any('NOMBRE' in cell or 'DESCRIPCI' in cell for cell in row_upper)
+                    has_precio = any('PRECIO' in cell or 'P.UNIT' in cell or 'P. UNIT' in cell for cell in row_upper)
+                    has_unidades = any('UNIDAD' in cell or 'CANT' in cell for cell in row_upper)
+
+                    if has_nombre and has_precio:
+                        header_row_idx = ri
+                        for ci, cell in enumerate(row_upper):
+                            if 'CODIGO' in cell or 'CÓDIGO' in cell:
+                                col_codigo = ci
+                            elif 'NOMBRE' in cell or 'DESCRIPCI' in cell:
+                                col_nombre = ci
+                            elif 'UNIDAD' in cell or 'CANT' in cell:
+                                col_unidades = ci
+                            elif 'PRECIO' in cell and 'TOTAL' not in cell:
+                                col_precio = ci
+                            elif 'TOTAL' in cell:
+                                col_total = ci
+                            elif 'P.UNIT' in cell or 'P. UNIT' in cell:
+                                col_precio = ci
+                            elif 'P.TOTAL' in cell or 'P. TOTAL' in cell:
+                                col_total = ci
+                        break
+
+                if header_row_idx < 0:
+                    continue
+
+                # If we couldn't find precio but found total, try to infer
+                # In SEVASA format: Código(0) | Nombre(1) | U/M(2) | Unidades(3) | Precio(4) | Total(5)
+                if col_precio < 0 and col_total >= 0:
+                    col_precio = col_total - 1
+
+                # Parse data rows after header
+                for ri in range(header_row_idx + 1, len(table)):
+                    row = table[ri]
+                    if row is None:
+                        continue
+
+                    row_str = [str(c).strip() if c else "" for c in row]
+                    joined_upper = " ".join(row_str).upper()
+
+                    # Skip empty rows
+                    if all(c == "" for c in row_str):
+                        continue
+
+                    # Skip summary/footer rows
+                    if any(pat in joined_upper for pat in summary_patterns):
+                        continue
+
+                    # Extract description
+                    desc = row_str[col_nombre] if col_nombre >= 0 and col_nombre < len(row_str) else ""
+                    desc = desc.replace('\n', ' ').strip()
+
+                    # Skip if description is empty or a summary word
+                    if not desc or len(desc) < 3:
+                        continue
+                    desc_upper = desc.upper()
+                    if any(pat in desc_upper for pat in summary_patterns):
+                        continue
+
+                    # Extract quantity
+                    cant = 1
+                    if col_unidades >= 0 and col_unidades < len(row_str):
+                        cant_val = self._clean_price(row_str[col_unidades])
+                        if cant_val > 0:
+                            cant = cant_val
+
+                    # Extract unit price
+                    precio_u = 0.0
+                    if col_precio >= 0 and col_precio < len(row_str):
+                        precio_u = self._clean_price(row_str[col_precio])
+
+                    # Extract total price
+                    precio_t = 0.0
+                    if col_total >= 0 and col_total < len(row_str):
+                        precio_t = self._clean_price(row_str[col_total])
+
+                    if precio_u > 0:
+                        items.append({
+                            'descripcion': desc,
+                            'cantidad': int(cant) if cant == int(cant) else cant,
+                            'precio_unitario': precio_u,
+                            'precio_total': precio_t if precio_t > 0 else precio_u * cant
+                        })
+
+        if items:
+            return items
+
+        # ── Attempt 3: Generic table fallback ──
+        if tables:
             for table in tables:
                 for row in table:
                     if row is None:
@@ -495,7 +703,7 @@ class ProformaParser:
 
                     # Skip headers
                     if any(skip in joined for skip in ["CANT.", "DESCRIPCI", "P. UNIT", "P.TOTAL",
-                                                        "CÓDIGO", "CODIGO"]):
+                                                        "CÓDIGO", "CODIGO", "NOMBRE"]):
                         continue
 
                     # Skip empty rows
@@ -522,7 +730,6 @@ class ProformaParser:
                             cant = int(cell)
                         elif not re.match(r'^[\d.,\s]+$', cell):
                             desc_upper = cell.upper()
-                            # Skip if it's a summary word
                             if desc_upper in ('TOTAL', 'SUBTOTAL', 'SUB-TOTAL', 'SUB TOTAL',
                                               'IVA', 'DESCUENTO', 'MONEDA', 'NETO'):
                                 continue
@@ -696,3 +903,19 @@ def parse_multiple_pdfs(filepaths: list) -> dict:
         'proformas': proformas,
         'all_items': all_items
     }
+
+def detect_supplier_from_pdf(filepath: str) -> str:
+    """Fast detection of supplier by reading only the first page."""
+    import pdfplumber
+    import os
+    if not os.path.exists(filepath):
+        return "DESCONOCIDO"
+    try:
+        with pdfplumber.open(filepath) as pdf:
+            if not pdf.pages:
+                return "DESCONOCIDO"
+            text = pdf.pages[0].extract_text() or ""
+            parser = ProformaParser()
+            return parser.detect_supplier(text)
+    except Exception:
+        return "DESCONOCIDO"

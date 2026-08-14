@@ -155,6 +155,12 @@ class ProformaApp(ctk.CTk):
                       height=48, corner_radius=10, width=160,
                       command=lambda: self._open_file("comparativo")).pack(side="left", padx=5, pady=10)
 
+        ctk.CTkButton(gen_frame, text="🖨️ Imprimir",
+                      font=ctk.CTkFont(size=12, weight="bold"),
+                      fg_color="#6366F1", hover_color="#4F46E5",
+                      height=48, corner_radius=10, width=140,
+                      command=lambda: self._print_generated_file("comparativo")).pack(side="left", padx=5, pady=10)
+
         self.compare_status = ctk.CTkLabel(gen_frame, text="",
                                             font=ctk.CTkFont(size=11),
                                             text_color=COLORS["text_secondary"])
@@ -235,6 +241,12 @@ class ProformaApp(ctk.CTk):
                       fg_color=COLORS["primary"], hover_color=COLORS["primary_hover"],
                       height=48, corner_radius=10, width=160,
                       command=lambda: self._open_file("orden")).pack(side="left", padx=5, pady=10)
+
+        ctk.CTkButton(gen_frame, text="🖨️ Imprimir",
+                      font=ctk.CTkFont(size=12, weight="bold"),
+                      fg_color="#6366F1", hover_color="#4F46E5",
+                      height=48, corner_radius=10, width=140,
+                      command=lambda: self._print_generated_file("orden")).pack(side="left", padx=5, pady=10)
 
         self.order_status = ctk.CTkLabel(gen_frame, text="",
                                           font=ctk.CTkFont(size=11),
@@ -352,8 +364,8 @@ class ProformaApp(ctk.CTk):
                 """Extract model/part numbers from a description."""
                 text = desc.upper().strip()
                 models = set()
-                # Match patterns like ARG-CB-0055, FUB-1290, AGI-1210, XTC-376, etc.
-                for m in _re.finditer(r'[A-Z]{2,}[\-][A-Z0-9]{1,}[\-]?[A-Z0-9]*', text):
+                # Match patterns like ARG-CB-0055, R-UPR758, NT-751, XTC-376, etc.
+                for m in _re.finditer(r'[A-Z]+[\-][A-Z0-9]+[\-]?[A-Z0-9]*', text):
                     val = m.group()
                     # Filter out false positives like MACHO-MACHO, PASTA-TERMICA
                     parts = val.split('-')
@@ -410,11 +422,29 @@ class ProformaApp(ctk.CTk):
                     'TECLADO': 'TECLADO', 'MOUSE': 'MOUSE',
                     'MONITOR': 'MONITOR', 'DISCO': 'DISCO',
                     'IMPRESORA': 'IMPRESORA', 'TONER': 'TONER',
+                    'UPS': 'UPS',
                 }
                 for kw in keywords:
                     if kw in cats:
                         return cats[kw]
                 return 'OTHER'
+
+            def _extract_brand(desc: str) -> str:
+                """Extract product brand from description to prevent cross-brand matching."""
+                text = desc.upper()
+                brands = [
+                    'FORZA', 'CDP', 'APC', 'TRIPP LITE', 'CYBERPOWER', 'EATON',
+                    'KINGSTON', 'SAMSUNG', 'WESTERN DIGITAL', 'SEAGATE', 'CRUCIAL',
+                    'LOGITECH', 'CORSAIR', 'RAZER', 'HYPERX',
+                    'HP', 'DELL', 'LENOVO', 'ASUS', 'ACER',
+                    'ARGOM', 'KLIP', 'XTECH',
+                    'EPSON', 'BROTHER', 'CANON', 'XEROX',
+                    'TPLINK', 'TP-LINK', 'DLINK', 'D-LINK', 'UBIQUITI', 'MIKROTIK',
+                ]
+                for brand in brands:
+                    if brand in text:
+                        return brand
+                return None
 
             def _models_match(models1: set, models2: set) -> bool:
                 """Check if any model from set1 matches or is a prefix of any model in set2."""
@@ -456,6 +486,7 @@ class ProformaApp(ctk.CTk):
                 item_frags = _model_fragments(item_models)
                 item_kw = _normalize(item['descripcion'], item_frags)
                 item_cat = _get_category(item_kw)
+                item_brand = _extract_brand(item['descripcion'])
 
                 # Find best matching existing row
                 best_match = None
@@ -468,6 +499,10 @@ class ProformaApp(ctk.CTk):
                     if item_cat != 'OTHER' and t.get('_category', 'OTHER') != 'OTHER':
                         if item_cat != t['_category']:
                             continue
+                    # Don't match across different brands
+                    t_brand = t.get('_brand')
+                    if item_brand and t_brand and item_brand != t_brand:
+                        continue
                     score = _similarity(item_kw, t['_keywords'],
                                         item_models, t.get('_models', set()))
                     if score > best_score:
@@ -492,6 +527,7 @@ class ProformaApp(ctk.CTk):
                         '_keywords': item_kw,
                         '_models': item_models,
                         '_category': item_cat,
+                        '_brand': item_brand,
                     })
 
             # Clean up internal keys before passing to table
@@ -499,6 +535,7 @@ class ProformaApp(ctk.CTk):
                 t.pop('_keywords', None)
                 t.pop('_models', None)
                 t.pop('_category', None)
+                t.pop('_brand', None)
 
             self.data_table.load_data(table_items)
             self._log(f"\n📊 {len(table_items)} artículo(s) cargados en la tabla.")
@@ -644,3 +681,22 @@ class ProformaApp(ctk.CTk):
             os.startfile(path)
         else:
             messagebox.showinfo("Sin archivo", "Primero genera el archivo.")
+
+    def _print_generated_file(self, file_type: str):
+        """Print the generated file using the default printer."""
+        path = None
+        if file_type == "comparativo":
+            path = getattr(self, 'last_comparativo_path', None)
+        elif file_type == "orden":
+            path = getattr(self, 'last_orden_path', None)
+
+        if not path or not os.path.exists(path):
+            messagebox.showinfo("Sin archivo", "Primero genera el archivo antes de imprimir.")
+            return
+
+        try:
+            os.startfile(path, "print")
+            messagebox.showinfo("Imprimiendo",
+                                f"Enviando a la impresora predeterminada:\n{os.path.basename(path)}")
+        except Exception as e:
+            messagebox.showerror("Error de impresión", f"No se pudo imprimir el archivo:\n{e}")
