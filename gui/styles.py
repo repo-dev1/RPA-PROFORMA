@@ -71,4 +71,5 @@ SUPPLIER_COLORS = {
     "CONICO": "#10B981",      # Green
     "COMTECH": "#F59E0B",     # Amber
     "SEVASA": "#8B5CF6",      # Purple
+    "SICSA": "#0EA5E9",       # Sky blue
 }

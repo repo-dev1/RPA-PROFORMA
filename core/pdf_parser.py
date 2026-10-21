@@ -1,6 +1,6 @@
 """
 PDF Parser for supplier proformas.
-Extracts product data from MASTERTEC, CONICO, COMTECH, and SEVASA PDFs.
+Extracts product data from MASTERTEC, CONICO, COMTECH, SEVASA and SICSA PDFs.
 """
 
 import pdfplumber
@@ -17,7 +17,7 @@ class ProformaParser:
     """Parses PDF proformas from different suppliers and extracts product data."""
 
     # Known supplier identifiers (searched in the PDF text, case-insensitive)
-    KNOWN_SUPPLIERS = ["MASTERTEC", "COMTECH", "CONICO", "SEVASA"]
+    KNOWN_SUPPLIERS = ["MASTERTEC", "COMTECH", "CONICO", "SEVASA", "SICSA"]
 
     def __init__(self):
         self.results = []  # List of parsed items
@@ -68,6 +68,8 @@ class ProformaParser:
                 items = self._parse_conico(full_text, all_tables)
             elif supplier == "SEVASA":
                 items = self._parse_sevasa(full_text, all_tables)
+            elif supplier == "SICSA":
+                items = self._parse_sicsa(full_text, all_tables)
             else:
                 items = self._parse_generic(full_text, all_tables)
 
@@ -83,6 +85,7 @@ class ProformaParser:
         """Extract proforma/quote number from text."""
         patterns = [
             r'(?:N[°º.]?\s*(?:PROFORMA|Proforma)|Proforma\s*#?:?|COTIZACI[ÓO]N\s*#?:?|N[°º]:?)\s*[:\s]*([A-Z0-9-]+\d+)',
+            r'PRESUPUESTO\s*#?\s*:?\s*(\d+)',
             r'(?:id_cot|cotizacion)[=/](\d+)',
         ]
         for pattern in patterns:
@@ -96,11 +99,13 @@ class ProformaParser:
         patterns = [
             r'FECHA:\s*(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})',
             r'Fecha:\s*(\d{1,2}/\d{1,2}/\d{2,4})',
+            # SICSA: "PRESUPUESTO # 23665 24 / 09 / 2026 - 10:17 am"
+            r'PRESUPUESTO\s*#?\s*\d+\s+(\d{1,2}\s*/\s*\d{1,2}\s*/\s*\d{2,4})',
         ]
         for pattern in patterns:
             m = re.search(pattern, text, re.IGNORECASE)
             if m:
-                return m.group(1).strip()
+                return re.sub(r'\s+', '', m.group(1))
         return ""
 
     def _clean_price(self, price_str) -> float:
@@ -748,6 +753,87 @@ class ProformaParser:
                             'precio_unitario': prices[0],
                             'precio_total': prices[-1] if len(prices) > 1 else prices[0] * cant
                         })
+
+        return items
+
+    # ─────────────────────────────────────────────
+    # SICSA Parser
+    # ─────────────────────────────────────────────
+    def _parse_sicsa(self, text: str, tables: list) -> list:
+        """Parse SICSA 'PRESUPUESTO' items.
+
+        Columns: CANT. | CODIGO Y DESCRIPCION | UNIDAD | EX | % DESC | SUBTOTAL
+
+        pdfplumber output examples:
+          1 PCM0196 COMPUTADORA DELL ... 3Y C$44,226.47 C$44,226.47   (single line)
+          TECL1241 TECLADO Y MOUSE LOGITECH ... ESPAÑOL               (desc line 1)
+          1 C$1,434.12 C$1,434.12                                     (qty/prices centered)
+          920-007820 NEGRO                                            (desc line 2)
+        """
+        items = []
+        price_re = re.compile(
+            r'^(\d+(?:\.\d+)?)\s+(.*?)\s*C\$\s*([\d,]+\.\d{2})(?:\s+.*?)?\s+C\$\s*([\d,]+\.\d{2})$'
+        )
+        end_markers = ("INSTRUCCIONES", "SUBTOTAL GRAVADO", "SUBTOTAL EXENTO",
+                       "TOTAL FINAL", "IMPUESTO", "DESCUENTO C$")
+
+        # 1) Collect lines of the items section
+        section = []
+        in_items = False
+        for line in text.split('\n'):
+            s = line.strip()
+            up = s.upper()
+            if not in_items:
+                if "CANT" in up and "CODIGO" in up and "SUBTOTAL" in up:
+                    in_items = True
+                continue
+            if any(mk in up for mk in end_markers):
+                in_items = False
+                continue
+            if s:
+                section.append(s)
+
+        # 2) Classify lines and group into items
+        parsed = [(s, price_re.match(s)) for s in section]
+        i = 0
+        pending = []  # description lines seen before a qty/price line
+        while i < len(parsed):
+            s, m = parsed[i]
+            if not m:
+                pending.append(s)
+                i += 1
+                continue
+
+            cant = float(m.group(1))
+            inline_desc = m.group(2).strip()
+            precio_u = self._clean_price(m.group(3))
+            precio_t = self._clean_price(m.group(4))
+            desc_lines = pending + ([inline_desc] if inline_desc else [])
+            pending = []
+            i += 1
+
+            # Qty/price line is vertically centered on multi-line descriptions:
+            # attach as many trailing lines as there were leading ones (min 1).
+            if not inline_desc:
+                n_after = max(len(desc_lines), 1)
+                while n_after > 0 and i < len(parsed) and not parsed[i][1]:
+                    desc_lines.append(parsed[i][0])
+                    i += 1
+                    n_after -= 1
+
+            desc = " ".join(desc_lines).strip()
+            # Drop the leading SICSA internal code (e.g. PCM0196, TECL1241)
+            desc = re.sub(r'^[A-Z]{2,6}\d{3,}\s+', '', desc)
+
+            if desc and precio_u > 0:
+                if cant == 0:
+                    cant = 1
+                items.append({
+                    'descripcion': desc,
+                    'cantidad': int(cant) if cant == int(cant) else cant,
+                    'precio_unitario': precio_u,
+                    'precio_total': precio_t if precio_t > 0 else precio_u * cant
+                })
 
         return items
 
